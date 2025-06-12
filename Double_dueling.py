@@ -18,11 +18,15 @@ import vizdoom as vzd
 import imageio
 import matplotlib.pyplot as plt
 import cv2
+from network import define_Transformer
 
-experiment_name = "Double_dueling_result1"
+experiment_name = "Double_dueling_result5"
 model_savefile = os.path.join("results", experiment_name, "models/model-test.pth")
 mode = 'Train' # 'Train' or 'Test'
-new_reward = False
+new_reward = False # Use new reward
+use_transformer = False  # Use transformer network instead of FC
+use_sgd = False  # Use SGD optimizer instead of Adam
+enhance_resolution = True  # Use enhanced resolution (60x90) instead of downsampled (30x45)
 os.makedirs(os.path.join("results", experiment_name, "models"), exist_ok=True)
 os.makedirs(os.path.join("results", experiment_name, "videos"), exist_ok=True)
 
@@ -34,16 +38,16 @@ learning_steps_per_epoch = 8000
 replay_memory_size = 20000
 
 # NN learning settings
-batch_size = 128
+batch_size = 64
 
 # Rewards
 action_reward = -1
 killing_reward = 200
 if new_reward:
     death_reward = -100
-    hurt_reward = -2
-    hit_reward = 20
-    shot_reward = -10
+    hurt_reward = -1
+    hit_reward = 10
+    shot_reward = -2
 else:
     death_reward = 0
     hurt_reward = 0
@@ -54,7 +58,10 @@ else:
 # MOVE_LEFT, MOVE_RIGHT, STAY, MOVE_LEFT + ATTACK, MOVE_RIGHT + ATTACK, ATTACK
 actions = [[True, False, False], [False, True, False], [False, False, False], [True, False, True], [False, True, True], [False, False, True]]
 frame_repeat = 1
-resolution = (30, 45) # Downsampled resolution of the input image (480*640)
+if enhance_resolution:
+    resolution = (60, 90)  # Enhanced resolution of the input image (480*640)
+else:
+    resolution = (30, 45) # Downsampled resolution of the input image (480*640)
 episodes_test = 5
 max_steps = 500
 
@@ -202,10 +209,11 @@ def run(game, agent, num_epochs, steps_per_epoch=5000):
                 total_reward += reward
                 next_state = preprocess(game.get_state().screen_buffer)
             agent.append_memory(state, action, reward, next_state, done)
-            if global_step > agent.batch_size:
+            if global_step > agent.batch_size * 5:
                 agent.train()
             global_step += 1
-        agent.update_target_net()
+        if global_step % 1000 == 0:
+            agent.update_target_net()
         all_results += train_scores
         train_scores = np.array(train_scores)
         print(
@@ -290,20 +298,42 @@ class DuelQNet(nn.Module):
             nn.BatchNorm2d(32),
             nn.ReLU(),
         )
-        self.state_fc = nn.Sequential(nn.Linear(512, 64), nn.ReLU(), nn.Linear(64, 1))
-        self.advantage_fc = nn.Sequential(
-            nn.Linear(512, 64), nn.ReLU(), nn.Linear(64, available_actions_count)
-        )
+        if use_transformer:
+            # Transformer layers for the Duel DQN
+            if enhance_resolution:
+                self.state_fc = define_Transformer(114, 1, 32, h_dim=64)
+                self.advantage_fc = define_Transformer(114, available_actions_count, 32, h_dim=64)
+            else:
+                self.state_fc = define_Transformer(16, 1, 32, h_dim=64)
+                self.advantage_fc = define_Transformer(16, available_actions_count, 32, h_dim=64)
+        else:
+            # Fully connected layers for the Duel DQN
+            if enhance_resolution:
+                self.state_fc = nn.Sequential(nn.Linear(3648, 64), nn.ReLU(), nn.Linear(64, 1))
+                self.advantage_fc = nn.Sequential(
+                    nn.Linear(3648, 64), nn.ReLU(), nn.Linear(64, available_actions_count)
+                )
+            else:
+                self.state_fc = nn.Sequential(nn.Linear(512, 64), nn.ReLU(), nn.Linear(64, 1))
+                self.advantage_fc = nn.Sequential(
+                    nn.Linear(512, 64), nn.ReLU(), nn.Linear(64, available_actions_count)
+                )
 
     def forward(self, x):
         bs = x.shape[0]
         x = self.conv1(x)
         x = self.conv2(x)
         x = self.conv3(x)
-        x = x.view(bs, -1)
-        feature_size = x.shape[1]
-        x1 = x[:, :int(feature_size/2)]  # state value
-        x2 = x[:, int(feature_size/2):]  # relative advantage of actions in the state
+        if use_transformer:
+            x = x.view(bs, x.shape[1], -1)
+            feature_size = x.shape[-1]
+            x1 = x[:, :, :int(feature_size/2)]  # state value
+            x2 = x[:, :, int(feature_size/2):]  # relative advantage of actions in the state
+        else:
+            x = x.view(bs, -1)
+            feature_size = x.shape[-1]
+            x1 = x[:, :int(feature_size/2)]  # state value
+            x2 = x[:, int(feature_size/2):]  # relative advantage of actions in the state
         state_value = self.state_fc(x1).reshape(-1, 1)
         advantage_values = self.advantage_fc(x2)
         x = state_value + (
@@ -343,7 +373,11 @@ class DQNAgent:
             print("Initializing new model")
             self.q_net = DuelQNet(action_size).to(DEVICE)
             self.target_net = DuelQNet(action_size).to(DEVICE)
-        self.opt = optim.Adam(self.q_net.parameters(), lr=self.lr)
+        if use_sgd:
+            self.opt = optim.SGD(self.q_net.parameters(), lr=self.lr, momentum=0.9)
+            self.scheduler = optim.lr_scheduler.StepLR(self.opt, step_size=5000, gamma=0.9)
+        else:
+            self.opt = optim.Adam(self.q_net.parameters(), lr=self.lr, eps=1e-4)
 
     def get_action(self, state, mode='epsilon_greedy'):
         if np.random.uniform() < self.epsilon and mode == 'epsilon_greedy':
@@ -388,10 +422,9 @@ class DQNAgent:
         td_error = self.criterion(q_targets, action_values)
         td_error.backward()
         self.opt.step()
-        if self.epsilon > self.epsilon_min:
-            self.epsilon *= self.epsilon_decay
-        else:
-            self.epsilon = self.epsilon_min
+        if use_sgd:
+            self.scheduler.step()
+        self.epsilon = max(self.epsilon*self.epsilon_decay, self.epsilon_min)
 
 if __name__ == "__main__":
     # Initialize game and actions
