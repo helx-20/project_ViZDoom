@@ -17,45 +17,50 @@ from tqdm import trange
 import vizdoom as vzd
 import imageio
 import matplotlib.pyplot as plt
+import cv2
 
-experiment_name = "Double_dueling"
+experiment_name = "Double_dueling_result2"
 model_savefile = os.path.join("results", experiment_name, "models/model-test.pth")
-mode = 'Train' # 'Train' or 'Test'
+mode = 'Test' # 'Train' or 'Test'
+new_reward = True
 os.makedirs(os.path.join("results", experiment_name, "models"), exist_ok=True)
 os.makedirs(os.path.join("results", experiment_name, "videos"), exist_ok=True)
 
 # Q-learning settings
-learning_rate = 0.00025
+learning_rate = 1e-4
 discount_factor = 0.99
-train_epochs = 5
-learning_steps_per_epoch = 4000
-replay_memory_size = 10000
+train_epochs = 15
+learning_steps_per_epoch = 6000
+replay_memory_size = 15000
 
 # NN learning settings
 batch_size = 128
 
-# Training regime
-test_episodes_per_epoch = 0
-
 # Rewards
 action_reward = -0.1
 killing_reward = 100
-death_reward = -50
-hurt_reward = -1
-hit_reward = 10
-shot_reward = -5
+if new_reward:
+    death_reward = -50
+    hurt_reward = -1
+    hit_reward = 10
+    shot_reward = -1
+else:
+    death_reward = 0
+    hurt_reward = 0
+    hit_reward = 0
+    shot_reward = 0
 
 # Other parameters
 # MOVE_LEFT, MOVE_RIGHT, STAY, MOVE_LEFT + ATTACK, MOVE_RIGHT + ATTACK, ATTACK
 actions = [[True, False, False], [False, True, False], [False, False, False], [True, False, True], [False, True, True], [False, False, True]]
 frame_repeat = 1
 resolution = (30, 45) # Downsampled resolution of the input image (480*640)
-episodes_to_watch = 5
-max_steps = 200
+episodes_test = 5
+max_steps = 500
 
 if mode == 'Test':
     save_model = False
-    load_model = True
+    load_model = False
     skip_learning = True
 else:
     save_model = True
@@ -129,41 +134,6 @@ def get_rewards(variables_current, variables_last=None):
     return reward
 
 
-def test(game, agent):
-    """Runs a test_episodes_per_epoch episodes and prints the result"""
-    print("\nTesting...")
-    test_scores = []
-    for test_episode in trange(test_episodes_per_epoch, leave=False):
-        game.new_episode()
-        total_reward = 0
-        step = 0
-        current_variables = game.get_state().game_variables
-        while not game.is_episode_finished() and step <= max_steps:
-            last_variables = current_variables
-            state = preprocess(game.get_state().screen_buffer)
-            best_action_index = agent.get_action(state, mode='deterministic')
-            game.make_action(actions[best_action_index], frame_repeat)
-            if not game.is_episode_finished():
-                current_variables = game.get_state().game_variables
-                reward = get_rewards(current_variables, last_variables)
-            else:
-                reward = action_reward
-            total_reward += reward
-            step += 1
-        test_scores.append(total_reward)
-
-    test_scores = np.array(test_scores)
-    print(
-        "Results: mean: {:.1f} +/- {:.1f},".format(
-            test_scores.mean(), test_scores.std()
-        ),
-        "min: %.1f" % test_scores.min(),
-        "max: %.1f" % test_scores.max(),
-    )
-
-    return test_scores.mean(), test_scores.std()
-
-
 def calculate_smooth_and_variance(data, window_size):
     """
     Calculates the smoothed data and variance for the given data using a moving window.
@@ -228,7 +198,7 @@ def run(game, agent, num_epochs, steps_per_epoch=5000):
             last_variables = game.get_state().game_variables
             game.make_action(actions[action], frame_repeat)
             local_step += 1
-            done = game.is_episode_finished() or local_step > max_steps
+            done = game.is_episode_finished() or local_step > max_steps or last_variables[0] == 3
             if done:
                 if not game.is_episode_finished():
                     current_variables = game.get_state().game_variables
@@ -264,8 +234,6 @@ def run(game, agent, num_epochs, steps_per_epoch=5000):
             "max: %.1f," % train_scores.max(),
         )
 
-        # test_mean, test_std = test(game, agent)
-
         draw_results(all_results, os.path.join("results", experiment_name, "all_results.png"))
         np.save(os.path.join("results", experiment_name, "all_results.npy"), all_results)
         if save_model:
@@ -286,17 +254,22 @@ def generate_videos(game, agent, save_path):
     game.set_mode(vzd.Mode.ASYNC_PLAYER)
     game.init()
 
-    for i in range(episodes_to_watch):
+    for i in range(episodes_test):
         game.new_episode()
         frames = []
         total_reward = 0
         step = 0
         current_variables = game.get_state().game_variables
-        while not game.is_episode_finished() and step <= max_steps:
+        while not game.is_episode_finished() and step <= max_steps and current_variables[0] < 3:
             # print(step, current_variables, total_reward)
             last_variables = current_variables
             screen_buf = game.get_state().screen_buffer
             if screen_buf is not None:
+                kill, health, bullets, hit, _ = current_variables
+                cv2.putText(screen_buf, f"kills: {int(kill)}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2, cv2.LINE_AA)
+                cv2.putText(screen_buf, f"health: {int(health)}", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2, cv2.LINE_AA)
+                cv2.putText(screen_buf, f"bullets: {int(bullets)}", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2, cv2.LINE_AA)
+                cv2.putText(screen_buf, f"hit: {int(hit)}", (10, 120), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2, cv2.LINE_AA)
                 frames.append(screen_buf.copy())
             state = preprocess(screen_buf)
             best_action_index = agent.get_action(state, mode='deterministic')
@@ -390,8 +363,8 @@ class DQNAgent:
         lr,
         load_model,
         epsilon=1,
-        epsilon_decay=0.9996,
-        epsilon_min=0.05,
+        epsilon_decay=0.9997,
+        epsilon_min=0.1,
     ):
         self.action_size = action_size
         self.epsilon = epsilon
@@ -414,7 +387,7 @@ class DQNAgent:
             self.q_net = DuelQNet(action_size).to(DEVICE)
             self.target_net = DuelQNet(action_size).to(DEVICE)
 
-        self.opt = optim.SGD(self.q_net.parameters(), lr=self.lr)
+        self.opt = optim.Adam(self.q_net.parameters(), lr=self.lr)
 
     def get_action(self, state, mode='epsilon_greedy'):
         if np.random.uniform() < self.epsilon and mode == 'epsilon_greedy':
