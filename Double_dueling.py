@@ -19,31 +19,31 @@ import imageio
 import matplotlib.pyplot as plt
 import cv2
 
-experiment_name = "Double_dueling_result2"
+experiment_name = "Double_dueling_result1"
 model_savefile = os.path.join("results", experiment_name, "models/model-test.pth")
-mode = 'Test' # 'Train' or 'Test'
-new_reward = True
+mode = 'Train' # 'Train' or 'Test'
+new_reward = False
 os.makedirs(os.path.join("results", experiment_name, "models"), exist_ok=True)
 os.makedirs(os.path.join("results", experiment_name, "videos"), exist_ok=True)
 
 # Q-learning settings
 learning_rate = 1e-4
 discount_factor = 0.99
-train_epochs = 15
-learning_steps_per_epoch = 6000
-replay_memory_size = 15000
+train_epochs = 20
+learning_steps_per_epoch = 8000
+replay_memory_size = 20000
 
 # NN learning settings
 batch_size = 128
 
 # Rewards
-action_reward = -0.1
-killing_reward = 100
+action_reward = -1
+killing_reward = 200
 if new_reward:
-    death_reward = -50
-    hurt_reward = -1
-    hit_reward = 10
-    shot_reward = -1
+    death_reward = -100
+    hurt_reward = -2
+    hit_reward = 20
+    shot_reward = -10
 else:
     death_reward = 0
     hurt_reward = 0
@@ -60,17 +60,12 @@ max_steps = 500
 
 if mode == 'Test':
     save_model = False
-    load_model = False
+    load_model = True
     skip_learning = True
 else:
     save_model = True
     load_model = False
     skip_learning = False
-
-# Configuration file path
-# config_file_path = os.path.join(vzd.scenarios_path, "simpler_basic.cfg")
-# config_file_path = os.path.join(vzd.scenarios_path, "rocket_basic.cfg")
-# config_file_path = os.path.join(vzd.scenarios_path, "basic.cfg")
 
 # Uses GPU if available
 if torch.cuda.is_available():
@@ -79,7 +74,6 @@ if torch.cuda.is_available():
 else:
     DEVICE = torch.device("cpu")
 
-
 def preprocess(img):
     """Down samples image to resolution"""
     img = skimage.transform.resize(img, resolution)
@@ -87,11 +81,9 @@ def preprocess(img):
     img = np.expand_dims(img, axis=0)
     return img
 
-
 def create_simple_game():
     print("Initializing doom...")
     game = vzd.DoomGame()
-    # game.load_config(config_file_path)
     game.set_doom_scenario_path(os.path.join(vzd.scenarios_path, "basic.wad"))
     game.set_doom_map("map02")
     game.set_available_buttons(
@@ -100,7 +92,6 @@ def create_simple_game():
     game.set_episode_timeout(max_steps*100)
     game.set_episode_start_time(10)
     game.set_living_reward(0)
-
     # number of kills, health, bullets, hit, death
     game.set_available_game_variables([vzd.GameVariable.KILLCOUNT, vzd.GameVariable.HEALTH, vzd.GameVariable.AMMO2, vzd.GameVariable.HITCOUNT, vzd.GameVariable.DEATHCOUNT])
     game.set_window_visible(False)
@@ -111,7 +102,6 @@ def create_simple_game():
     print("Doom initialized.")
 
     return game
-
 
 def get_rewards(variables_current, variables_last=None):
     """
@@ -133,7 +123,6 @@ def get_rewards(variables_current, variables_last=None):
 
     return reward
 
-
 def calculate_smooth_and_variance(data, window_size):
     """
     Calculates the smoothed data and variance for the given data using a moving window.
@@ -149,14 +138,13 @@ def calculate_smooth_and_variance(data, window_size):
             new_data.append(sum(data[i-window_size:i]) / window_size)
     return new_data, variances
 
-
 def draw_results(all_results, save_path):
     """
     Draws the training results.
     """
     plt.rcParams['font.size'] = 18
     plt.figure(figsize=(12, 6))
-    all_results_smooth, all_results_variance = calculate_smooth_and_variance(all_results, 10)
+    all_results_smooth, all_results_variance = calculate_smooth_and_variance(all_results, 20)
     all_results_upper = [all_results_smooth[i] + all_results_variance[i] for i in range(len(all_results_smooth))]
     all_results_lower = [all_results_smooth[i] - all_results_variance[i] for i in range(len(all_results_smooth))]
     plt.plot(all_results_smooth, color='blue')
@@ -174,7 +162,6 @@ def draw_results(all_results, save_path):
     plt.savefig(save_path, dpi=300)
     plt.close('all')
 
-
 def run(game, agent, num_epochs, steps_per_epoch=5000):
     """
     Run num epochs of training episodes.
@@ -183,7 +170,6 @@ def run(game, agent, num_epochs, steps_per_epoch=5000):
 
     start_time = time()
     all_results = []
-
     for epoch in range(num_epochs):
         game.new_episode()
         train_scores = []
@@ -191,7 +177,6 @@ def run(game, agent, num_epochs, steps_per_epoch=5000):
         local_step = 0
         total_reward = 0
         print(f"\nEpoch #{epoch + 1}")
-
         for _ in trange(steps_per_epoch, leave=False):
             state = preprocess(game.get_state().screen_buffer)
             action = agent.get_action(state)
@@ -216,34 +201,25 @@ def run(game, agent, num_epochs, steps_per_epoch=5000):
                 reward = get_rewards(current_variables, last_variables)
                 total_reward += reward
                 next_state = preprocess(game.get_state().screen_buffer)
-
             agent.append_memory(state, action, reward, next_state, done)
             if global_step > agent.batch_size:
                 agent.train()
             global_step += 1
-
         agent.update_target_net()
         all_results += train_scores
         train_scores = np.array(train_scores)
-
         print(
-            "Results: mean: {:.1f} +/- {:.1f},".format(
-                train_scores.mean(), train_scores.std()
-            ),
+            "Results: mean: {:.1f} +/- {:.1f},".format(train_scores.mean(), train_scores.std()),
             "min: %.1f," % train_scores.min(),
             "max: %.1f," % train_scores.max(),
         )
-
         draw_results(all_results, os.path.join("results", experiment_name, "all_results.png"))
         np.save(os.path.join("results", experiment_name, "all_results.npy"), all_results)
         if save_model:
-            print("Saving the network weights to:", model_savefile)
             torch.save(agent.q_net, model_savefile)
         print("Total elapsed time: %.2f minutes" % ((time() - start_time) / 60.0))
-
     game.close()
-    return agent, game, all_results
-
+    return agent, game
 
 def generate_videos(game, agent, save_path):
     """
@@ -253,14 +229,13 @@ def generate_videos(game, agent, save_path):
     game.set_window_visible(False)
     game.set_mode(vzd.Mode.ASYNC_PLAYER)
     game.init()
-
     for i in range(episodes_test):
         game.new_episode()
         frames = []
         total_reward = 0
         step = 0
         current_variables = game.get_state().game_variables
-        while not game.is_episode_finished() and step <= max_steps and current_variables[0] < 3:
+        while not game.is_episode_finished() and step <= max_steps:
             # print(step, current_variables, total_reward)
             last_variables = current_variables
             screen_buf = game.get_state().screen_buffer
@@ -270,7 +245,10 @@ def generate_videos(game, agent, save_path):
                 cv2.putText(screen_buf, f"health: {int(health)}", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2, cv2.LINE_AA)
                 cv2.putText(screen_buf, f"bullets: {int(bullets)}", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2, cv2.LINE_AA)
                 cv2.putText(screen_buf, f"hit: {int(hit)}", (10, 120), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2, cv2.LINE_AA)
+                cv2.putText(screen_buf, f"steps: {int(step+1)}", (10, 150), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2, cv2.LINE_AA)
                 frames.append(screen_buf.copy())
+            if current_variables[0] >= 3:
+                break
             state = preprocess(screen_buf)
             best_action_index = agent.get_action(state, mode='deterministic')
             game.make_action(actions[best_action_index], frame_repeat)
@@ -281,57 +259,40 @@ def generate_videos(game, agent, save_path):
                 reward = action_reward
             total_reward += reward
             step += 1
-
         score = total_reward
         total_kills = current_variables[0]
         print(f"Episode #{i + 1} finished after {step} steps.")
         print('Total kills', total_kills)
         print(f"Total score: {score:.4f}")
-        # Save the episode as a video
         video_path = os.path.join(save_path, f"episode_{i + 1}.mp4")
-        if frames:
-            imageio.mimsave(video_path, frames, fps=10)
-            print(f"Saved video to {video_path}")
-        else:
-            print("No frames to save for this episode.")
-
+        imageio.mimsave(video_path, frames, fps=10)
+        print(f"Saved video to {video_path}")
 
 class DuelQNet(nn.Module):
     """
-    This is Duel DQN architecture.
-    see https://arxiv.org/abs/1511.06581 for more information.
+    Duel DQN architecture.
     """
 
     def __init__(self, available_actions_count):
         super().__init__()
         self.conv1 = nn.Sequential(
-            nn.Conv2d(1, 8, kernel_size=3, stride=2, bias=False),
+            nn.Conv2d(1, 8, kernel_size=3, stride=2, bias=True),
             nn.BatchNorm2d(8),
             nn.ReLU(),
         )
-
         self.conv2 = nn.Sequential(
-            nn.Conv2d(8, 8, kernel_size=3, stride=2, bias=False),
-            nn.BatchNorm2d(8),
-            nn.ReLU(),
-        )
-
-        self.conv3 = nn.Sequential(
-            nn.Conv2d(8, 8, kernel_size=3, stride=1, bias=False),
-            nn.BatchNorm2d(8),
-            nn.ReLU(),
-        )
-
-        self.conv4 = nn.Sequential(
-            nn.Conv2d(8, 16, kernel_size=3, stride=1, bias=False),
+            nn.Conv2d(8, 16, kernel_size=3, stride=2, bias=True),
             nn.BatchNorm2d(16),
             nn.ReLU(),
         )
-
-        self.state_fc = nn.Sequential(nn.Linear(96, 64), nn.ReLU(), nn.Linear(64, 1))
-
+        self.conv3 = nn.Sequential(
+            nn.Conv2d(16, 32, kernel_size=3, stride=1, bias=True),
+            nn.BatchNorm2d(32),
+            nn.ReLU(),
+        )
+        self.state_fc = nn.Sequential(nn.Linear(512, 64), nn.ReLU(), nn.Linear(64, 1))
         self.advantage_fc = nn.Sequential(
-            nn.Linear(96, 64), nn.ReLU(), nn.Linear(64, available_actions_count)
+            nn.Linear(512, 64), nn.ReLU(), nn.Linear(64, available_actions_count)
         )
 
     def forward(self, x):
@@ -339,10 +300,9 @@ class DuelQNet(nn.Module):
         x = self.conv1(x)
         x = self.conv2(x)
         x = self.conv3(x)
-        x = self.conv4(x)
         x = x.view(bs, -1)
         feature_size = x.shape[1]
-        x1 = x[:, :int(feature_size/2)]  # input for the net to calculate the state value
+        x1 = x[:, :int(feature_size/2)]  # state value
         x2 = x[:, int(feature_size/2):]  # relative advantage of actions in the state
         state_value = self.state_fc(x1).reshape(-1, 1)
         advantage_values = self.advantage_fc(x2)
@@ -351,8 +311,7 @@ class DuelQNet(nn.Module):
         )
 
         return x
-
-
+    
 class DQNAgent:
     def __init__(
         self,
@@ -363,8 +322,8 @@ class DQNAgent:
         lr,
         load_model,
         epsilon=1,
-        epsilon_decay=0.9997,
-        epsilon_min=0.1,
+        epsilon_decay=0.9999,
+        epsilon_min=0.01,
     ):
         self.action_size = action_size
         self.epsilon = epsilon
@@ -375,18 +334,15 @@ class DQNAgent:
         self.lr = lr
         self.memory = deque(maxlen=memory_size)
         self.criterion = nn.MSELoss()
-
         if load_model:
             print("Loading model from: ", model_savefile)
             self.q_net = torch.load(model_savefile, weights_only=False, map_location='cpu').to(DEVICE)
             self.target_net = torch.load(model_savefile, weights_only=False, map_location='cpu').to(DEVICE)
             self.epsilon = self.epsilon_min
-
         else:
             print("Initializing new model")
             self.q_net = DuelQNet(action_size).to(DEVICE)
             self.target_net = DuelQNet(action_size).to(DEVICE)
-
         self.opt = optim.Adam(self.q_net.parameters(), lr=self.lr)
 
     def get_action(self, state, mode='epsilon_greedy'):
@@ -407,44 +363,35 @@ class DQNAgent:
     def train(self):
         batch = random.sample(self.memory, self.batch_size)
         batch = np.array(batch, dtype=object)
-
         states = np.stack(batch[:, 0]).astype(float)
         actions = batch[:, 1].astype(int)
         rewards = batch[:, 2].astype(float)
         next_states = np.stack(batch[:, 3]).astype(float)
         dones = batch[:, 4].astype(bool)
         not_dones = ~dones
-
-        row_idx = np.arange(self.batch_size)  # used for indexing the batch
+        row_idx = np.arange(self.batch_size)
 
         # value of the next states with double q learning
-        # see https://arxiv.org/abs/1509.06461 for more information on double q learning
         with torch.no_grad():
             next_states = torch.from_numpy(next_states).float().to(DEVICE)
             idx = row_idx, np.argmax(self.q_net(next_states).cpu().data.numpy(), 1)
             next_state_values = self.target_net(next_states).cpu().data.numpy()[idx]
             next_state_values = next_state_values[not_dones]
 
-        # this defines y = r + discount * max_a q(s', a)
         q_targets = rewards.copy()
         q_targets[not_dones] += self.discount * next_state_values
         q_targets = torch.from_numpy(q_targets).float().to(DEVICE)
-
-        # this selects only the q values of the actions taken
         idx = row_idx, actions
         states = torch.from_numpy(states).float().to(DEVICE)
         action_values = self.q_net(states)[idx].float().to(DEVICE)
-
         self.opt.zero_grad()
         td_error = self.criterion(q_targets, action_values)
         td_error.backward()
         self.opt.step()
-
         if self.epsilon > self.epsilon_min:
             self.epsilon *= self.epsilon_decay
         else:
             self.epsilon = self.epsilon_min
-
 
 if __name__ == "__main__":
     # Initialize game and actions
