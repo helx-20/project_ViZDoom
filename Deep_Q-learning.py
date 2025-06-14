@@ -161,7 +161,7 @@ def run(game, agent, num_epochs, steps_per_epoch=5000):
             last_variables = game.get_state().game_variables
             game.make_action(actions[action])
             local_step += 1
-            done = game.is_episode_finished() or local_step > max_steps or last_variables[0] == 3
+            done = game.is_episode_finished() or local_step > max_steps or last_variables[0] == 1
             if done:
                 if not game.is_episode_finished():
                     current_variables = game.get_state().game_variables
@@ -224,7 +224,7 @@ def generate_videos(game, agent, save_path):
                 cv2.putText(screen_buf, f"hit: {int(hit)}", (10, 120), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2, cv2.LINE_AA)
                 cv2.putText(screen_buf, f"steps: {int(step+1)}", (10, 150), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2, cv2.LINE_AA)
                 frames.append(screen_buf.copy())
-            if current_variables[0] >= 3:
+            if current_variables[0] == 1:
                 break
             state = preprocess(screen_buf)
             best_action_index = agent.get_action(state, mode='deterministic')
