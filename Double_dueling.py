@@ -17,14 +17,15 @@ import matplotlib.pyplot as plt
 import cv2
 from network import define_Transformer
 
-experiment_name = "Double_dueling_result6"
+experiment_name = "Deep_Q-learning_dueling_resolution_sgd_reward_map02"
 model_savefile = os.path.join("results", experiment_name, "models/model-test.pth")
 mode = 'Train' # 'Train' or 'Test'
-new_reward = False # Use new reward
+new_reward = True # Use new reward
 use_transformer = False  # Use transformer network instead of FC
-use_sgd = False  # Use SGD optimizer instead of Adam
-enhance_resolution = False # Use enhanced resolution (60x90) instead of downsampled (30x45)
-duel = False # Use duel DQN architecture
+use_sgd = True  # Use SGD optimizer instead of Adam
+enhance_resolution = True # Use enhanced resolution (60x90) instead of downsampled (30x45)
+duel = True # Use duel DQN architecture
+double = False # Use double DQN architecture
 map_name = "map02"  # Map name for the game
 os.makedirs(os.path.join("results", experiment_name, "models"), exist_ok=True)
 os.makedirs(os.path.join("results", experiment_name, "videos"), exist_ok=True)
@@ -40,13 +41,12 @@ replay_memory_size = 20000
 batch_size = 64
 
 # Rewards
+kill_reward = 100
 if new_reward:
-    death_reward = -100
     hurt_reward = -0.1
     hit_reward = 10
     shot_reward = -1
 else:
-    death_reward = 0
     hurt_reward = 0
     hit_reward = 0
     shot_reward = 0
@@ -126,7 +126,7 @@ def get_rewards(variables_current, variables_last=None):
     else:
         hurt = 0
         shot = 0
-    reward = hurt * hurt_reward + shot * shot_reward + hit * hit_reward + death * death_reward
+    reward = kills * kill_reward + hurt * hurt_reward + shot * shot_reward + hit * hit_reward
 
     return reward
 
@@ -194,10 +194,12 @@ def run(game, agent, num_epochs, steps_per_epoch=5000):
                 if not game.is_episode_finished():
                     current_variables = game.get_state().game_variables
                     new_reward = get_rewards(current_variables, last_variables)
+                    last_variables = current_variables
                     reward += new_reward
                 else:
                     new_reward = 0
-                total_reward += new_reward
+                # total_reward += new_reward
+                total_reward = last_variables[0] * kill_reward
                 next_state = np.zeros((1, int(resolution[0]), int(resolution[1]))).astype(np.float32)
                 train_scores.append(game.get_total_reward()+total_reward)
                 game.new_episode()
@@ -212,7 +214,7 @@ def run(game, agent, num_epochs, steps_per_epoch=5000):
             if global_step > agent.batch_size * 2:
                 agent.train()
             global_step += 1
-            if global_step % 1000 == 0:
+            if global_step % 2000 == 0:
                 agent.update_target_net()
         all_results += train_scores
         train_scores = np.array(train_scores)
@@ -266,7 +268,8 @@ def generate_videos(game, agent, save_path):
                 new_reward = get_rewards(current_variables, last_variables)
             else:
                 new_reward = 0
-            total_reward += new_reward
+            # total_reward += new_reward
+            total_reward = current_variables[0] * kill_reward
             step += 1
         score = total_reward + game.get_total_reward()
         total_kills = current_variables[0]
@@ -276,6 +279,50 @@ def generate_videos(game, agent, save_path):
         video_path = os.path.join(save_path, f"episode_{i + 1}.mp4")
         imageio.mimsave(video_path, frames, fps=10)
         print(f"Saved video to {video_path}")
+
+class QNet(nn.Module):
+    """
+    DQN architecture.
+    """
+
+    def __init__(self, available_actions_count):
+        super().__init__()
+        self.conv1 = nn.Sequential(
+            nn.Conv2d(1, 8, kernel_size=3, stride=1, bias=False),
+            nn.BatchNorm2d(8),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=2, stride=2)
+        )
+        self.conv2 = nn.Sequential(
+            nn.Conv2d(8, 8, kernel_size=3, stride=1, bias=False),
+            nn.BatchNorm2d(8),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=2, stride=2)
+        )
+        self.conv3 = nn.Sequential(
+            nn.Conv2d(8, 8, kernel_size=3, stride=1, bias=False),
+            nn.BatchNorm2d(8),
+            nn.ReLU(),
+        )
+        self.conv4 = nn.Sequential(
+            nn.Conv2d(8, 16, kernel_size=3, stride=1, bias=False),
+            nn.BatchNorm2d(16),
+            nn.ReLU(),
+        )
+        self.fc = nn.Sequential(
+            nn.Linear(160, 64), nn.ReLU(), nn.Linear(64, available_actions_count)
+        )
+
+    def forward(self, x):
+        bs = x.shape[0]
+        x = self.conv1(x)
+        x = self.conv2(x)
+        x = self.conv3(x)
+        x = self.conv4(x)
+        x = x.view(bs, -1)
+        x = self.fc(x)
+
+        return x
 
 class DuelQNet(nn.Module):
     """
@@ -309,53 +356,45 @@ class DuelQNet(nn.Module):
         if use_transformer:
             # Transformer layers for the Duel DQN
             if enhance_resolution:
-                self.state_fc = define_Transformer(136, 1, 16, h_dim=64)
-                self.advantage_fc = define_Transformer(137, available_actions_count, 16, h_dim=64)
+                self.state_fc = define_Transformer(76, 1, 16, h_dim=64)
+                self.advantage_fc = define_Transformer(77, available_actions_count, 16, h_dim=64)
             else:
-                self.state_fc = define_Transformer(27, 1, 16, h_dim=64)
-                self.advantage_fc = define_Transformer(27, available_actions_count, 16, h_dim=64)
+                self.state_fc = define_Transformer(5, 1, 16, h_dim=64)
+                self.advantage_fc = define_Transformer(5, available_actions_count, 16, h_dim=64)
         else:
             # Fully connected layers for the Duel DQN
             if enhance_resolution:
-                self.state_fc = nn.Sequential(nn.Linear(2184, 64), nn.ReLU(), nn.Linear(64, 1))
+                self.state_fc = nn.Sequential(nn.Linear(1224, 64), nn.ReLU(), nn.Linear(64, 1))
                 self.advantage_fc = nn.Sequential(
-                    nn.Linear(2184, 64), nn.ReLU(), nn.Linear(64, available_actions_count)
+                    nn.Linear(1224, 64), nn.ReLU(), nn.Linear(64, available_actions_count)
                 )
             else:
                 self.state_fc = nn.Sequential(nn.Linear(80, 64), nn.ReLU(), nn.Linear(64, 1))
                 self.advantage_fc = nn.Sequential(
                     nn.Linear(80, 64), nn.ReLU(), nn.Linear(64, available_actions_count)
                 )
-        if not duel:
-            if enhance_resolution:
-                self.transition = nn.Sequential(nn.Linear(2184 * 2, 2184))
-            else:
-                self.transition = nn.Sequential(nn.Linear(80 * 2, 80))
 
     def forward(self, x):
         bs = x.shape[0]
         x = self.conv1(x)
         x = self.conv2(x)
-        if duel:
-            if use_transformer:
-                x = x.view(bs, x.shape[1], -1)
-                feature_size = x.shape[-1]
-                x1 = x[:, :, :int(feature_size/2)]  # state value
-                x2 = x[:, :, int(feature_size/2):]  # relative advantage of actions in the state
-            else:
-                x = x.view(bs, -1)
-                feature_size = x.shape[-1]
-                x1 = x[:, :int(feature_size/2)]  # state value
-                x2 = x[:, int(feature_size/2):]  # relative advantage of actions in the state
-            state_value = self.state_fc(x1).reshape(-1, 1)
-            advantage_values = self.advantage_fc(x2)
-            x = state_value + (
-                advantage_values - advantage_values.mean(dim=1).reshape(-1, 1)
-            )
+        x = self.conv3(x)
+        x = self.conv4(x)
+        if use_transformer:
+            x = x.view(bs, x.shape[1], -1)
+            feature_size = x.shape[-1]
+            x1 = x[:, :, :int(feature_size/2)]  # state value
+            x2 = x[:, :, int(feature_size/2):]  # relative advantage of actions in the state
         else:
             x = x.view(bs, -1)
-            x = self.transition(x)
-            x = self.advantage_fc(x)
+            feature_size = x.shape[-1]
+            x1 = x[:, :int(feature_size/2)]  # state value
+            x2 = x[:, int(feature_size/2):]  # relative advantage of actions in the state
+        state_value = self.state_fc(x1).reshape(-1, 1)
+        advantage_values = self.advantage_fc(x2)
+        x = state_value + (
+            advantage_values - advantage_values.mean(dim=1).reshape(-1, 1)
+        )
 
         return x
     
@@ -388,8 +427,12 @@ class DQNAgent:
             self.epsilon = self.epsilon_min
         else:
             print("Initializing new model")
-            self.q_net = DuelQNet(action_size).to(DEVICE)
-            self.target_net = DuelQNet(action_size).to(DEVICE)
+            if not duel:
+                self.q_net = QNet(action_size).to(DEVICE)
+                self.target_net = QNet(action_size).to(DEVICE)
+            else:
+                self.q_net = DuelQNet(action_size).to(DEVICE)
+                self.target_net = DuelQNet(action_size).to(DEVICE)
         if use_sgd:
             self.opt = optim.SGD(self.q_net.parameters(), lr=self.lr, momentum=0.9)
             self.scheduler = optim.lr_scheduler.StepLR(self.opt, step_size=2000, gamma=0.9)
@@ -425,7 +468,10 @@ class DQNAgent:
         with torch.no_grad():
             next_states = torch.from_numpy(next_states).float().to(DEVICE)
             idx = row_idx, np.argmax(self.q_net(next_states).cpu().data.numpy(), 1)
-            next_state_values = self.target_net(next_states).cpu().data.numpy()[idx]
+            if double:
+                next_state_values = self.target_net(next_states).cpu().data.numpy()[idx]
+            else:
+                next_state_values = self.q_net(next_states).cpu().data.numpy()[idx]
             next_state_values = next_state_values[not_dones]
 
         q_targets = rewards.copy()
