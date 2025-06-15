@@ -15,34 +15,31 @@ import vizdoom as vzd
 import imageio
 import matplotlib.pyplot as plt
 import cv2
-from network import define_Transformer
 
-experiment_name = "Deep_Q-learning"
+experiment_name = "Deep_Q-learning_double_dueling"
 model_savefile = os.path.join("results", experiment_name, "models/model-test.pth")
 mode = 'Train' # 'Train' or 'Test'
+double = True # Use double DQN
+dueling = True # Use dueling DQN
 os.makedirs(os.path.join("results", experiment_name, "models"), exist_ok=True)
 os.makedirs(os.path.join("results", experiment_name, "videos"), exist_ok=True)
 
 # Q-learning settings
 learning_rate = 1e-4
 discount_factor = 0.99
-train_epochs = 5
-learning_steps_per_epoch = 2000
+train_epochs = 10
+learning_steps_per_epoch = 5000
 replay_memory_size = 5000
 
 # NN learning settings
-batch_size = 128
-
-# Rewards
-action_reward = -0.4
-killing_reward = 100
+batch_size = 64
 
 # Other parameters
-# MOVE_LEFT, MOVE_RIGHT, STAY, MOVE_LEFT + ATTACK, MOVE_RIGHT + ATTACK, ATTACK
-actions = [[True, False, False], [False, True, False], [False, False, False], [True, False, True], [False, True, True], [False, False, True]]
+# MOVE_LEFT, MOVE_RIGHT, Attack
+actions = [[True, False, False], [False, True, False], [False, False, True]]
 resolution = (30, 45) # Downsampled resolution of the input image (480*640)
 episodes_test = 5
-max_steps = 200
+max_steps = 100
 
 if mode == 'Test':
     save_model = False
@@ -77,7 +74,7 @@ def create_simple_game():
     )
     game.set_episode_timeout(max_steps*100)
     game.set_episode_start_time(10)
-    game.set_living_reward(0)
+    game.set_living_reward(-0.4)
     # number of kills, health, bullets, hit, death
     game.set_available_game_variables([vzd.GameVariable.KILLCOUNT, vzd.GameVariable.HEALTH, vzd.GameVariable.AMMO2, vzd.GameVariable.HITCOUNT, vzd.GameVariable.DEATHCOUNT])
     game.set_window_visible(False)
@@ -88,19 +85,6 @@ def create_simple_game():
     print("Doom initialized.")
 
     return game
-
-def get_rewards(variables_current, variables_last=None):
-    """
-    Returns the reward based on the game variables.
-    The variables are in the order: [kills, health, bullets, hit, death]
-    """
-    kills, health, bullets, hit, death = variables_current
-    if variables_last is not None:
-        kills_last, health_last, bullets_last, hit_last, death_last = variables_last
-        kills = kills - kills_last
-    reward = kills * killing_reward + action_reward
-
-    return reward
 
 def calculate_smooth_and_variance(data, window_size):
     """
@@ -158,31 +142,26 @@ def run(game, agent, num_epochs, steps_per_epoch=5000):
         for _ in trange(steps_per_epoch, leave=False):
             state = preprocess(game.get_state().screen_buffer)
             action = agent.get_action(state)
-            last_variables = game.get_state().game_variables
-            game.make_action(actions[action])
+            reward = game.make_action(actions[action])
+            total_reward += reward
             local_step += 1
-            done = game.is_episode_finished() or local_step > max_steps or last_variables[0] == 1
+            done = game.is_episode_finished() or local_step > max_steps
             if done:
-                if not game.is_episode_finished():
-                    current_variables = game.get_state().game_variables
-                    reward = get_rewards(current_variables, last_variables)
-                else:
-                    reward = action_reward
-                total_reward += reward
+                total_reward = game.get_total_reward()
                 next_state = np.zeros((1, int(resolution[0]), int(resolution[1]))).astype(np.float32)
                 train_scores.append(total_reward)
                 game.new_episode()
                 local_step = 0
                 total_reward = 0
             else:
-                current_variables = game.get_state().game_variables
-                reward = get_rewards(current_variables, last_variables)
-                total_reward += reward
                 next_state = preprocess(game.get_state().screen_buffer)
             agent.append_memory(state, action, reward, next_state, done)
             if global_step > agent.batch_size * 2:
                 agent.train()
             global_step += 1
+            if double:
+                if global_step % 1000 == 0:
+                    agent.update_target_net()
         all_results += train_scores
         train_scores = np.array(train_scores)
         print(
@@ -214,7 +193,7 @@ def generate_videos(game, agent, save_path):
         current_variables = game.get_state().game_variables
         while not game.is_episode_finished() and step <= max_steps:
             # print(step, current_variables, total_reward)
-            last_variables = current_variables
+            current_variables = game.get_state().game_variables
             screen_buf = game.get_state().screen_buffer
             if screen_buf is not None:
                 kill, health, bullets, hit, _ = current_variables
@@ -223,20 +202,14 @@ def generate_videos(game, agent, save_path):
                 cv2.putText(screen_buf, f"bullets: {int(bullets)}", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2, cv2.LINE_AA)
                 cv2.putText(screen_buf, f"hit: {int(hit)}", (10, 120), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2, cv2.LINE_AA)
                 cv2.putText(screen_buf, f"steps: {int(step+1)}", (10, 150), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2, cv2.LINE_AA)
+                cv2.putText(screen_buf, f"total reward: {total_reward:.1f}", (10, 150), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2, cv2.LINE_AA)
                 frames.append(screen_buf.copy())
-            if current_variables[0] == 1:
-                break
             state = preprocess(screen_buf)
             best_action_index = agent.get_action(state, mode='deterministic')
-            game.make_action(actions[best_action_index])
-            if not game.is_episode_finished():
-                current_variables = game.get_state().game_variables
-                reward = get_rewards(current_variables, last_variables)
-            else:
-                reward = action_reward
+            reward = game.make_action(actions[best_action_index])
             total_reward += reward
             step += 1
-        score = total_reward
+        score = game.get_total_reward()
         total_kills = current_variables[0]
         print(f"Episode #{i + 1} finished after {step} steps.")
         print('Total kills', total_kills)
@@ -253,31 +226,63 @@ class QNet(nn.Module):
     def __init__(self, available_actions_count):
         super().__init__()
         self.conv1 = nn.Sequential(
-            nn.Conv2d(1, 8, kernel_size=3, stride=2, bias=True),
-            nn.BatchNorm2d(8),
+            nn.Conv2d(1, 8, kernel_size=3, stride=1, bias=True),
             nn.ReLU(),
+            nn.MaxPool2d(kernel_size=2, stride=2)
         )
         self.conv2 = nn.Sequential(
-            nn.Conv2d(8, 16, kernel_size=3, stride=2, bias=True),
-            nn.BatchNorm2d(16),
+            nn.Conv2d(8, 16, kernel_size=3, stride=1, bias=True),
             nn.ReLU(),
-        )
-        self.conv3 = nn.Sequential(
-            nn.Conv2d(16, 32, kernel_size=3, stride=1, bias=True),
-            nn.BatchNorm2d(32),
-            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=2, stride=2)
         )
         self.fc = nn.Sequential(
-            nn.Linear(1024, 64), nn.ReLU(), nn.Linear(64, available_actions_count)
+            nn.Linear(864, 64), nn.ReLU(), nn.Linear(64, available_actions_count)
         )
 
     def forward(self, x):
         bs = x.shape[0]
         x = self.conv1(x)
         x = self.conv2(x)
-        x = self.conv3(x)
         x = x.view(bs, -1)
         x = self.fc(x)
+
+        return x
+    
+class DuelQNet(nn.Module):
+    """
+    DuelDQN architecture.
+    """
+
+    def __init__(self, available_actions_count):
+        super().__init__()
+        self.conv1 = nn.Sequential(
+            nn.Conv2d(1, 8, kernel_size=3, stride=1, bias=True),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=2, stride=2)
+        )
+        self.conv2 = nn.Sequential(
+            nn.Conv2d(8, 16, kernel_size=3, stride=1, bias=True),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=2, stride=2)
+        )
+        self.state_fc = nn.Sequential(nn.Linear(432, 64), nn.ReLU(), nn.Linear(64, 1))
+        self.advantage_fc = nn.Sequential(
+            nn.Linear(432, 64), nn.ReLU(), nn.Linear(64, available_actions_count)
+        )
+
+    def forward(self, x):
+        bs = x.shape[0]
+        x = self.conv1(x)
+        x = self.conv2(x)
+        x = x.view(bs, -1)
+        feature_size = x.shape[-1]
+        x1 = x[:, :int(feature_size/2)]  # state value
+        x2 = x[:, int(feature_size/2):]  # relative advantage of actions in the state
+        state_value = self.state_fc(x1).reshape(-1, 1)
+        advantage_values = self.advantage_fc(x2)
+        x = state_value + (
+            advantage_values - advantage_values.mean(dim=1).reshape(-1, 1)
+        )
 
         return x
     
@@ -303,14 +308,35 @@ class DQNAgent:
         self.lr = lr
         self.memory = deque(maxlen=memory_size)
         self.criterion = nn.MSELoss()
-        if load_model:
-            print("Loading model from: ", model_savefile)
-            self.q_net = torch.load(model_savefile, weights_only=False, map_location='cpu').to(DEVICE)
-            self.epsilon = self.epsilon_min
+        if double:
+            print("Using Double DQN")
+            if load_model:
+                print("Loading model from: ", model_savefile)
+                self.q_net = torch.load(model_savefile, weights_only=False, map_location='cpu').to(DEVICE)
+                self.target_net = torch.load(model_savefile, weights_only=False, map_location='cpu').to(DEVICE)
+                self.epsilon = self.epsilon_min
+            else:
+                print("Initializing new model")
+                if dueling:
+                    print("Using Dueling DQN")
+                    self.q_net = DuelQNet(action_size).to(DEVICE)
+                    self.target_net = DuelQNet(action_size).to(DEVICE)
+                else:
+                    self.q_net = QNet(action_size).to(DEVICE)
+                    self.target_net = QNet(action_size).to(DEVICE)
+                self.target_net.load_state_dict(self.q_net.state_dict())
         else:
-            print("Initializing new model")
-            self.q_net = QNet(action_size).to(DEVICE)
+            if load_model:
+                print("Loading model from: ", model_savefile)
+                self.q_net = torch.load(model_savefile, weights_only=False, map_location='cpu').to(DEVICE)
+                self.epsilon = self.epsilon_min
+            else:
+                print("Initializing new model")
+                self.q_net = QNet(action_size).to(DEVICE)
         self.opt = optim.Adam(self.q_net.parameters(), lr=self.lr)
+
+    def update_target_net(self):
+        self.target_net.load_state_dict(self.q_net.state_dict())
 
     def get_action(self, state, mode='epsilon_greedy'):
         if np.random.uniform() < self.epsilon and mode == 'epsilon_greedy':
@@ -338,7 +364,10 @@ class DQNAgent:
         with torch.no_grad():
             next_states = torch.from_numpy(next_states).float().to(DEVICE)
             idx = row_idx, np.argmax(self.q_net(next_states).cpu().data.numpy(), 1)
-            next_state_values = self.q_net(next_states).cpu().data.numpy()[idx]
+            if double:
+                next_state_values = self.target_net(next_states).cpu().data.numpy()[idx]
+            else:
+                next_state_values = self.q_net(next_states).cpu().data.numpy()[idx]
             next_state_values = next_state_values[not_dones]
 
         q_targets = rewards.copy()

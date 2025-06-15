@@ -17,14 +17,15 @@ import matplotlib.pyplot as plt
 import cv2
 from network import define_Transformer
 
-experiment_name = "Double_dueling_result7"
+experiment_name = "Double_dueling_result0"
 model_savefile = os.path.join("results", experiment_name, "models/model-test.pth")
 mode = 'Train' # 'Train' or 'Test'
 new_reward = False # Use new reward
 use_transformer = False  # Use transformer network instead of FC
-use_sgd = True  # Use SGD optimizer instead of Adam
-enhance_resolution = True # Use enhanced resolution (60x90) instead of downsampled (30x45)
-duel = True  # Use duel DQN architecture
+use_sgd = False  # Use SGD optimizer instead of Adam
+enhance_resolution = False # Use enhanced resolution (60x90) instead of downsampled (30x45)
+duel = True # Use duel DQN architecture
+map_name = "map02"  # Map name for the game
 os.makedirs(os.path.join("results", experiment_name, "models"), exist_ok=True)
 os.makedirs(os.path.join("results", experiment_name, "videos"), exist_ok=True)
 
@@ -43,8 +44,8 @@ action_reward = -0.4
 killing_reward = 100
 if new_reward:
     death_reward = -100
-    hurt_reward = -0.5
-    hit_reward = 5
+    hurt_reward = -0.1
+    hit_reward = 10
     shot_reward = -1
 else:
     death_reward = 0
@@ -53,8 +54,12 @@ else:
     shot_reward = 0
 
 # Other parameters
-# MOVE_LEFT, MOVE_RIGHT, STAY, MOVE_LEFT + ATTACK, MOVE_RIGHT + ATTACK, ATTACK
-actions = [[True, False, False], [False, True, False], [False, False, False], [True, False, True], [False, True, True], [False, False, True]]
+if map_name == "map01":
+    # MOVE_LEFT, MOVE_RIGHT, ATTACK
+    actions = [[True, False, False], [False, True, False], [False, False, True]]
+elif map_name == "map02":
+    # MOVE_LEFT, MOVE_RIGHT, STAY, MOVE_LEFT + ATTACK, MOVE_RIGHT + ATTACK, ATTACK
+    actions = [[True, False, False], [False, True, False], [False, False, False], [True, False, True], [False, True, True], [False, False, True]]
 if enhance_resolution:
     resolution = (60, 90)  # Enhanced resolution of the input image (480*640)
 else:
@@ -89,7 +94,7 @@ def create_simple_game():
     print("Initializing doom...")
     game = vzd.DoomGame()
     game.set_doom_scenario_path(os.path.join(vzd.scenarios_path, "basic.wad"))
-    game.set_doom_map("map02")
+    game.set_doom_map(map_name)
     game.set_available_buttons(
         [vzd.Button.MOVE_LEFT, vzd.Button.MOVE_RIGHT, vzd.Button.ATTACK]
     )
@@ -208,8 +213,8 @@ def run(game, agent, num_epochs, steps_per_epoch=5000):
             if global_step > agent.batch_size * 2:
                 agent.train()
             global_step += 1
-        if global_step % 2000 == 0:
-            agent.update_target_net()
+            if global_step % 2000 == 0:
+                agent.update_target_net()
         all_results += train_scores
         train_scores = np.array(train_scores)
         print(
@@ -316,9 +321,9 @@ class DuelQNet(nn.Module):
                 )
         if not duel:
             if enhance_resolution:
-                self.transition = nn.Sequential(nn.Linear(3648 * 2, 3648), nn.ReLU())
+                self.transition = nn.Sequential(nn.Linear(3648 * 2, 3648))
             else:
-                self.transition = nn.Sequential(nn.Linear(512 * 2, 512), nn.ReLU())
+                self.transition = nn.Sequential(nn.Linear(512 * 2, 512))
 
     def forward(self, x):
         bs = x.shape[0]
