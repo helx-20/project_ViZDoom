@@ -16,43 +16,30 @@ import imageio
 import matplotlib.pyplot as plt
 import cv2
 
-experiment_name = "Deep_Q-learning_dueling_map02" # Name of the experiment
+experiment_name = "Deep_Q-learning_dueling_map01" # Name of the experiment
 model_savefile = os.path.join("results", experiment_name, "models/model-test.pth")
 mode = 'Train' # 'Train' or 'Test'
 double = False # Use double DQN
 dueling = True # Use dueling DQN
-map_name = "map02" # Name of the map to use
 os.makedirs(os.path.join("results", experiment_name, "models"), exist_ok=True)
 os.makedirs(os.path.join("results", experiment_name, "videos"), exist_ok=True)
 
 # Q-learning settings
 learning_rate = 2e-4
 discount_factor = 0.99
-if map_name == "map01":
-    train_epochs = 10
-    learning_steps_per_epoch = 2000
-    replay_memory_size = 10000
-elif map_name == "map02":
-    train_epochs = 20
-    learning_steps_per_epoch = 6000
-    replay_memory_size = 20000
+train_epochs = 10
+learning_steps_per_epoch = 2000
+replay_memory_size = 10000
 
 # NN learning settings
 batch_size = 64
 
 # Other parameters
-if map_name == "map01":
-    # MOVE_LEFT, MOVE_RIGHT, Attack
-    actions = [[True, False, False], [False, True, False], [False, False, True]]
-elif map_name == "map02":
-    # MOVE_LEFT, MOVE_RIGHT, STAY, MOVE_LEFT + ATTACK, MOVE_RIGHT + ATTACK, ATTACK
-    actions = [[True, False, False], [False, True, False], [False, False, False], [True, False, True], [False, True, True], [False, False, True]]
+# MOVE_LEFT, MOVE_RIGHT, Attack
+actions = [[True, False, False], [False, True, False], [False, False, True]]
 resolution = (30, 45) # Downsampled resolution of the input image (480*640)
 episodes_test = 5
-if map_name == "map01":
-    max_steps = 100
-elif map_name == "map02":
-    max_steps = 200
+max_steps = 100
 
 if mode == 'Test':
     save_model = False
@@ -81,16 +68,13 @@ def create_simple_game():
     print("Initializing doom...")
     game = vzd.DoomGame()
     game.set_doom_scenario_path(os.path.join(vzd.scenarios_path, "basic.wad"))
-    game.set_doom_map(map_name)
+    game.set_doom_map('map01')
     game.set_available_buttons(
         [vzd.Button.MOVE_LEFT, vzd.Button.MOVE_RIGHT, vzd.Button.ATTACK]
     )
     game.set_episode_timeout(max_steps*100)
     game.set_episode_start_time(10)
-    if map_name == "map01":
-        game.set_living_reward(-1)
-    elif map_name == "map02":
-        game.set_living_reward(-0.4)
+    game.set_living_reward(-1)
     # number of kills, health, bullets, hit, death
     game.set_available_game_variables([vzd.GameVariable.KILLCOUNT, vzd.GameVariable.HEALTH, vzd.GameVariable.AMMO2, vzd.GameVariable.HITCOUNT, vzd.GameVariable.DEATHCOUNT])
     game.set_window_visible(False)
@@ -160,8 +144,6 @@ def run(game, agent, num_epochs, steps_per_epoch=5000):
             reward = game.make_action(actions[action])
             local_step += 1
             done = game.is_episode_finished() or local_step > max_steps
-            if map_name == 'map02' and game.get_state().game_variables[0] == 3:
-                done = True
             if done:
                 total_reward = game.get_total_reward()
                 next_state = np.zeros((1, int(resolution[0]), int(resolution[1]))).astype(np.float32)
@@ -175,7 +157,7 @@ def run(game, agent, num_epochs, steps_per_epoch=5000):
                 agent.train()
             global_step += 1
             if double:
-                if global_step % (500 if map_name=='map01' else 2000) == 0:
+                if global_step % 500 == 0:
                     agent.update_target_net()
         all_results += train_scores
         train_scores = np.array(train_scores)
@@ -220,14 +202,12 @@ def generate_videos(game, agent, save_path):
                 cv2.putText(screen_buf, f"total reward: {total_reward:.1f}", (10, 180), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2, cv2.LINE_AA)
                 frames.append(screen_buf.copy())
                 screen_buf = game.get_state().screen_buffer
-            if map_name == 'map02' and current_variables[0] == 3:
-                break
             state = preprocess(screen_buf)
             best_action_index = agent.get_action(state, mode='deterministic')
             reward = game.make_action(actions[best_action_index])
             total_reward += reward
             step += 1
-        if game.is_episode_finished() and map_name == 'map01':
+        if game.is_episode_finished():
             kill, health, bullets, hit, _ = current_variables
             if kill == 0:
                 kill = 1

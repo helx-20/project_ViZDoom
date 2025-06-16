@@ -17,28 +17,28 @@ import matplotlib.pyplot as plt
 import cv2
 from network import define_Transformer
 
-experiment_name = "Deep_Q-learning_dueling_resolution_sgd_reward_map02"
+experiment_name = "best_dueling_transformer_map02" # "Deep_Q-learning_double_resolution_transformer_map02"
 model_savefile = os.path.join("results", experiment_name, "models/model-test.pth")
-mode = 'Train' # 'Train' or 'Test'
-new_reward = True # Use new reward
-use_transformer = False  # Use transformer network instead of FC
-use_sgd = True  # Use SGD optimizer instead of Adam
-enhance_resolution = True # Use enhanced resolution (60x90) instead of downsampled (30x45)
+mode = 'Test' # 'Train' or 'Test'
+new_reward = False # Use new reward
+use_transformer = True # Use transformer network instead of FC
+use_sgd = False # Use SGD optimizer instead of Adam
+enhance_resolution = False # Use enhanced resolution (60x90) instead of downsampled (30x45)
 duel = True # Use duel DQN architecture
 double = False # Use double DQN architecture
-map_name = "map02"  # Map name for the game
+use_rgb = False # Use RGB input instead of gray scale
 os.makedirs(os.path.join("results", experiment_name, "models"), exist_ok=True)
 os.makedirs(os.path.join("results", experiment_name, "videos"), exist_ok=True)
 
 # Q-learning settings
-learning_rate = 2e-4
+learning_rate = 1e-4
 discount_factor = 0.99
-train_epochs = 40
+train_epochs = 20
 learning_steps_per_epoch = 6000
 replay_memory_size = 20000
 
 # NN learning settings
-batch_size = 64
+batch_size = 128
 
 # Rewards
 kill_reward = 100
@@ -52,18 +52,14 @@ else:
     shot_reward = 0
 
 # Other parameters
-if map_name == "map01":
-    # MOVE_LEFT, MOVE_RIGHT, ATTACK
-    actions = [[True, False, False], [False, True, False], [False, False, True]]
-elif map_name == "map02":
-    # MOVE_LEFT, MOVE_RIGHT, STAY, MOVE_LEFT + ATTACK, MOVE_RIGHT + ATTACK, ATTACK
-    actions = [[True, False, False], [False, True, False], [False, False, False], [True, False, True], [False, True, True], [False, False, True]]
+# MOVE_LEFT, MOVE_RIGHT, STAY, MOVE_LEFT + ATTACK, MOVE_RIGHT + ATTACK, ATTACK
+actions = [[True, False, False], [False, True, False], [False, False, False], [True, False, True], [False, True, True], [False, False, True]]
 if enhance_resolution:
     resolution = (60, 90)  # Enhanced resolution of the input image (480*640)
 else:
     resolution = (30, 45) # Downsampled resolution of the input image (480*640)
 episodes_test = 5
-max_steps = 200
+max_steps = 400
 
 if mode == 'Test':
     save_model = False
@@ -85,14 +81,17 @@ def preprocess(img):
     """Down samples image to resolution"""
     img = skimage.transform.resize(img, resolution)
     img = img.astype(np.float32)
-    img = np.expand_dims(img, axis=0)
+    if use_rgb:
+        img = np.transpose(img, (2, 0, 1))
+    else:
+        img = np.expand_dims(img, axis=0)
     return img
 
 def create_simple_game():
     print("Initializing doom...")
     game = vzd.DoomGame()
     game.set_doom_scenario_path(os.path.join(vzd.scenarios_path, "basic.wad"))
-    game.set_doom_map(map_name)
+    game.set_doom_map('map02')
     game.set_available_buttons(
         [vzd.Button.MOVE_LEFT, vzd.Button.MOVE_RIGHT, vzd.Button.ATTACK]
     )
@@ -103,7 +102,10 @@ def create_simple_game():
     game.set_available_game_variables([vzd.GameVariable.KILLCOUNT, vzd.GameVariable.HEALTH, vzd.GameVariable.AMMO2, vzd.GameVariable.HITCOUNT, vzd.GameVariable.DEATHCOUNT])
     game.set_window_visible(False)
     game.set_mode(vzd.Mode.PLAYER)
-    game.set_screen_format(vzd.ScreenFormat.GRAY8)
+    if use_rgb:
+        game.set_screen_format(vzd.ScreenFormat.RGB24)
+    else:
+        game.set_screen_format(vzd.ScreenFormat.GRAY8)
     game.set_screen_resolution(vzd.ScreenResolution.RES_640X480)
     game.init()
     print("Doom initialized.")
@@ -200,7 +202,10 @@ def run(game, agent, num_epochs, steps_per_epoch=5000):
                     new_reward = 0
                 # total_reward += new_reward
                 total_reward = last_variables[0] * kill_reward
-                next_state = np.zeros((1, int(resolution[0]), int(resolution[1]))).astype(np.float32)
+                if use_rgb:
+                    next_state = np.zeros((3, int(resolution[0]), int(resolution[1]))).astype(np.float32)
+                else:
+                    next_state = np.zeros((1, int(resolution[0]), int(resolution[1]))).astype(np.float32)
                 train_scores.append(game.get_total_reward()+total_reward)
                 game.new_episode()
                 local_step = 0
@@ -287,12 +292,20 @@ class QNet(nn.Module):
 
     def __init__(self, available_actions_count):
         super().__init__()
-        self.conv1 = nn.Sequential(
-            nn.Conv2d(1, 8, kernel_size=3, stride=1, bias=False),
-            nn.BatchNorm2d(8),
-            nn.ReLU(),
-            nn.MaxPool2d(kernel_size=2, stride=2)
-        )
+        if use_rgb:
+            self.conv1 = nn.Sequential(
+                nn.Conv2d(3, 8, kernel_size=3, stride=1, bias=False),
+                nn.BatchNorm2d(8),
+                nn.ReLU(),
+                nn.MaxPool2d(kernel_size=2, stride=2)
+            )
+        else:
+            self.conv1 = nn.Sequential(
+                nn.Conv2d(1, 8, kernel_size=3, stride=1, bias=False),
+                nn.BatchNorm2d(8),
+                nn.ReLU(),
+                nn.MaxPool2d(kernel_size=2, stride=2)
+            )
         self.conv2 = nn.Sequential(
             nn.Conv2d(8, 8, kernel_size=3, stride=1, bias=False),
             nn.BatchNorm2d(8),
@@ -309,9 +322,20 @@ class QNet(nn.Module):
             nn.BatchNorm2d(16),
             nn.ReLU(),
         )
-        self.fc = nn.Sequential(
-            nn.Linear(160, 64), nn.ReLU(), nn.Linear(64, available_actions_count)
-        )
+        if enhance_resolution:
+            if use_transformer:
+                self.fc = define_Transformer(153, available_actions_count, 16, h_dim=64)
+            else:
+                self.fc = nn.Sequential(
+                    nn.Linear(2448, 64), nn.ReLU(), nn.Linear(64, available_actions_count)
+                )
+        else:
+            if use_transformer:
+                self.fc = define_Transformer(10, available_actions_count, 16, h_dim=64)
+            else:
+                self.fc = nn.Sequential(
+                    nn.Linear(160, 64), nn.ReLU(), nn.Linear(64, available_actions_count)
+                )
 
     def forward(self, x):
         bs = x.shape[0]
@@ -319,7 +343,10 @@ class QNet(nn.Module):
         x = self.conv2(x)
         x = self.conv3(x)
         x = self.conv4(x)
-        x = x.view(bs, -1)
+        if use_transformer:
+            x = x.reshape(bs, x.shape[1], -1)
+        else:
+            x = x.reshape(bs, -1)
         x = self.fc(x)
 
         return x
@@ -331,12 +358,20 @@ class DuelQNet(nn.Module):
 
     def __init__(self, available_actions_count):
         super().__init__()
-        self.conv1 = nn.Sequential(
-            nn.Conv2d(1, 8, kernel_size=3, stride=1, bias=False),
-            nn.BatchNorm2d(8),
-            nn.ReLU(),
-            nn.MaxPool2d(kernel_size=2, stride=2)
-        )
+        if use_rgb:
+            self.conv1 = nn.Sequential(
+                nn.Conv2d(3, 8, kernel_size=3, stride=1, bias=False),
+                nn.BatchNorm2d(8),
+                nn.ReLU(),
+                nn.MaxPool2d(kernel_size=2, stride=2)
+            )
+        else:
+            self.conv1 = nn.Sequential(
+                nn.Conv2d(1, 8, kernel_size=3, stride=1, bias=False),
+                nn.BatchNorm2d(8),
+                nn.ReLU(),
+                nn.MaxPool2d(kernel_size=2, stride=2)
+            )
         self.conv2 = nn.Sequential(
             nn.Conv2d(8, 8, kernel_size=3, stride=1, bias=False),
             nn.BatchNorm2d(8),
@@ -381,12 +416,12 @@ class DuelQNet(nn.Module):
         x = self.conv3(x)
         x = self.conv4(x)
         if use_transformer:
-            x = x.view(bs, x.shape[1], -1)
+            x = x.reshape(bs, x.shape[1], -1)
             feature_size = x.shape[-1]
             x1 = x[:, :, :int(feature_size/2)]  # state value
             x2 = x[:, :, int(feature_size/2):]  # relative advantage of actions in the state
         else:
-            x = x.view(bs, -1)
+            x = x.reshape(bs, -1)
             feature_size = x.shape[-1]
             x1 = x[:, :int(feature_size/2)]  # state value
             x2 = x[:, int(feature_size/2):]  # relative advantage of actions in the state
